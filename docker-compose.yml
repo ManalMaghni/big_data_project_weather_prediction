@@ -1,0 +1,247 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_MAX_CLIENT_CNXNS: 0
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # NOUVEAU HBASE - MASTER
+  hbase-master:
+    image: blueskyareahm/hbase-base:2.1.3
+    container_name: hbase-master
+    hostname: hbase-master
+    command: master
+    depends_on:
+      - zookeeper
+    ports:
+      - "16000:16000"   # HBase Master
+      - "16010:16010"   # HBase Master UI
+    environment:
+      HBASE_ROOT_LOGGER: INFO,console
+      HBASE_CLUSTER_DISTRIBUTED: "true"
+      HBASE_MANAGES_ZK: "false"
+      HBASE_ZOOKEEPER_QUORUM: zookeeper
+      HBASE_ZOOKEEPER_PROPERTY_CLIENTPORT: "2181"
+    volumes:
+      - hbase-master-data:/hbase-data
+      - hbase-master-logs:/opt/hbase/logs
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+  # NOUVEAU HBASE - REGIONSERVER
+  hbase-regionserver:
+    image: blueskyareahm/hbase-base:2.1.3
+    container_name: hbase-regionserver
+    hostname: hbase-regionserver
+    command: regionserver
+    depends_on:
+      - zookeeper
+      - hbase-master
+    ports:
+      - "16020:16020"   # RegionServer
+      - "16030:16030"   # RegionServer UI
+      - "9090:9090"     # Thrift
+      - "9095:9095"     # REST API
+    environment:
+      HBASE_ROOT_LOGGER: INFO,console
+      HBASE_CLUSTER_DISTRIBUTED: "true"
+      HBASE_MANAGES_ZK: "false"
+      HBASE_ZOOKEEPER_QUORUM: zookeeper
+      HBASE_ZOOKEEPER_PROPERTY_CLIENTPORT: "2181"
+      HBASE_REGIONSERVER_HOSTNAME: hbase-regionserver
+    volumes:
+      - hbase-regionserver-data:/hbase-data
+      - hbase-regionserver-logs:/opt/hbase/logs
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+  nifi:
+    image: apache/nifi:1.24.0
+    container_name: nifi
+    hostname: nifi
+    depends_on:
+      kafka:
+        condition: service_healthy
+      hbase-regionserver:
+        condition: service_started
+    ports:
+      - "8091:8080"
+    environment:
+      NIFI_WEB_HTTP_PORT: 8080
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: adminadminadmin
+      NIFI_JVM_HEAP_INIT: 512m
+      NIFI_JVM_HEAP_MAX: 1g
+    volumes:
+      - nifi-conf:/opt/nifi/nifi-current/conf
+      - nifi-logs:/opt/nifi/nifi-current/logs
+      - nifi-database:/opt/nifi/nifi-current/database_repository
+      - nifi-flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - nifi-content:/opt/nifi/nifi-current/content_repository
+      - nifi-provenance:/opt/nifi/nifi-current/provenance_repository
+      # Ajout pour HBase
+      - ./hbase-site.xml:/opt/nifi/nifi-current/conf/hbase-site.xml:ro
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+  spark:
+    image: apache/spark:3.5.0
+    container_name: spark
+    hostname: spark
+    user: root
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      # Configuration HBase pour Spark
+      - HBASE_ZOOKEEPER_QUORUM=zookeeper
+      - HBASE_ZOOKEEPER_PROPERTY_CLIENTPORT=2181
+    ports:
+      - "7077:7077"     # Spark Master
+      - "8088:8080"     # Spark UI
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    volumes:
+      - spark-logs:/opt/spark/logs
+      - ./models:/models
+      # Ajout pour HBase
+      - ./hbase-site.xml:/opt/spark/conf/hbase-site.xml:ro
+    depends_on:
+      - kafka
+      - hbase-regionserver
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+  zeppelin:
+    image: apache/zeppelin:0.11.0
+    container_name: zeppelin
+    hostname: zeppelin
+    user: root
+    depends_on:
+      - spark
+      - hbase-regionserver
+    ports:
+      - "8090:8080"
+    environment:
+      - ZEPPELIN_LOG_DIR=/logs
+      - ZEPPELIN_NOTEBOOK_DIR=/notebook
+      - ZEPPELIN_ADDR=0.0.0.0
+      - ZEPPELIN_PORT=8080
+      - SPARK_MASTER=spark://spark:7077
+      - ZEPPELIN_JAVA_OPTS=-Xms512m -Xmx1024m
+      # Configuration HBase pour Zeppelin
+      - HBASE_ZOOKEEPER_QUORUM=zookeeper
+      - HBASE_ZOOKEEPER_PROPERTY_CLIENTPORT=2181
+    volumes:
+      - zeppelin-notebook:/notebook
+      - zeppelin-logs:/logs
+      - zeppelin-conf:/opt/zeppelin/conf
+      - ./models:/models
+      # Ajout pour HBase
+      - ./hbase-site.xml:/opt/zeppelin/conf/hbase-site.xml:ro
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+  producer:
+    build: ./producer
+    container_name: weather-producer
+    hostname: producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      API_KEY: a2b4739a06db3f1c5fef13b14531e2c0
+    networks:
+      - bigdata-network
+    restart: unless-stopped
+
+networks:
+  bigdata-network:
+    driver: bridge
+    name: bigdata-network
+
+volumes:
+  zookeeper-data:
+    name: bigdata_zookeeper_data
+  zookeeper-logs:
+    name: bigdata_zookeeper_logs
+  kafka-data:
+    name: bigdata_kafka_data
+  # Nouveaux volumes HBase
+  hbase-master-data:
+    name: bigdata_hbase_master_data
+  hbase-master-logs:
+    name: bigdata_hbase_master_logs
+  hbase-regionserver-data:
+    name: bigdata_hbase_regionserver_data
+  hbase-regionserver-logs:
+    name: bigdata_hbase_regionserver_logs
+  nifi-conf:
+    name: bigdata_nifi_conf
+  nifi-logs:
+    name: bigdata_nifi_logs
+  nifi-database:
+    name: bigdata_nifi_database
+  nifi-flowfile:
+    name: bigdata_nifi_flowfile
+  nifi-content:
+    name: bigdata_nifi_content
+  nifi-provenance:
+    name: bigdata_nifi_provenance
+  spark-logs:
+    name: bigdata_spark_logs
+  zeppelin-notebook:
+    name: bigdata_zeppelin_notebook
+  zeppelin-logs:
+    name: bigdata_zeppelin_logs
+  zeppelin-conf:
+    name: bigdata_zeppelin_conf
