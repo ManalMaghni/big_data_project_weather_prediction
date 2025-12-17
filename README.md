@@ -18,34 +18,6 @@ L’objectif est de **collecter, valider, stocker et prédire les températures*
 
 ## 📦 Architecture
 
-Source API / capteurs
-        |
-        v
-      Kafka (topic: weather-data)
-        |
-        v
-   +-----------------+
-   | Apache NiFi:     |
-   | ConsumeKafka     |
-   | ValidateRecord   |
-   | PutHbaseRecord   |
-   +-----------------+
-        |
-        v
-      HBase (stockage batch validé)
-        ^
-        |
- Notebook ML (Batch)
-  - Lecture HBase
-  - Prétraitement
-  - Entrainement ML
-  - Sélection du meilleur modèle(LinearRegression, RandomForest, GradientBoostedTrees)
-  - Sauvegarde modèle (GBT)
-        |
-        v
- Notebook Spark Streaming
-  - Lecture Kafka
-  - Prétraitement
-  - Application du modèle sauvegardé
-  - Visualisation temps réel dans Zeppelin
+<img width="702" height="709" alt="image" src="https://github.com/user-attachments/assets/0075c78d-6470-4825-b274-65922771f358" />
+
 
